@@ -1,0 +1,40 @@
+# Low mutation regime exploration
+# Based on analysis showing best diversity at mutation_prob=0.005
+
+name: low_mutation_sweep
+num_steps: 150000  # Long enough to see stable evolution
+description: "Explore low mutation regime (0.001-0.01) with varying copy parameters"
+
+# VLM evaluation
+vlm_evaluation:
+  enabled: false  # Can enable with command line
+  eval_frequency: 37500  # 4 times across run
+  eval_trajectory: false
+
+# Focus on low mutation + varying copy distance
+# Hypothesis: Lower copy_dist → more species coexistence but less copying
+sweep:
+  # Very low mutation rates (stable evolution)
+  mutation_prob:
+    - 0.001  # Very stable
+    - 0.002  # Stable
+    - 0.005  # Sweet spot from analysis
+    - 0.01   # Moderate
+
+  # Copy distance: small→coexistence, large→mixing
+  max_copy_dist:
+    - 0.03   # Very local (high coexistence)
+    - 0.06   # Local (moderate coexistence)
+    - 0.10   # Medium range
+    - 0.15   # Wide range (low coexistence)
+
+  # Copy probability: how often copying happens
+  copy_prob:
+    - 0.0005 # Rare
+    - 0.002  # Moderate
+
+  # Species dimensionality (reduced to fit GPU memory)
+  # Note: 6D and 8D cause OOM even with 2500 particles
+  species_dim:
+    - 2      # Baseline
+    - 4      # Moderate (fits on 4GB GPU with 4000 particles)

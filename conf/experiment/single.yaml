@@ -1,0 +1,5 @@
+# Single experiment configuration
+
+name: single_run
+num_steps: 1000
+description: "Single experimental run with default parameters"

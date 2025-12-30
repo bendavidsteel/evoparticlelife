@@ -1,0 +1,32 @@
+# Focused evolutionary sweep (smaller for faster testing)
+
+name: evo_focused
+num_steps: 3000
+description: "Focused sweep on key evolutionary parameters"
+
+# VLM evaluation settings
+vlm_evaluation:
+  enabled: false
+  eval_frequency: 1500
+  eval_trajectory: false
+
+# Smaller sweep for faster testing
+sweep:
+  # Species copying
+  max_copy_dist:
+    - 0.05
+    - 0.10
+
+  copy_prob:
+    - 0.001
+    - 0.005
+
+  # Mutation
+  mutation_prob:
+    - 0.01
+    - 0.03
+
+  # Species complexity
+  species_dim:
+    - 2
+    - 4

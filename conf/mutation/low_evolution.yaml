@@ -1,0 +1,15 @@
+# Low evolutionary pressure configuration
+
+mutation_prob: 0.001
+min_radius: 0.03
+max_radius: 0.2
+
+noise_strength: 0.1  # Weaker mutations
+rotation_enabled: true
+scale_min: 0.7
+scale_max: 1.3  # Narrow scale range
+
+# Species copying parameters
+max_copy_dist: 0.05  # Narrow copy range
+max_species_dist: 0.1  # Only very similar species
+copy_prob: 0.0001  # Rare copying

@@ -1,0 +1,12 @@
+# Ultra-long single experiment
+# One very deep run to see full evolutionary trajectory
+
+name: ultra_long_single
+num_steps: 200000  # 50x longer - expect 30-60 min
+description: "Ultra-long run to observe full complexity emergence and evolutionary dynamics"
+
+# VLM evaluation - but infrequent
+vlm_evaluation:
+  enabled: true
+  eval_frequency: 50000  # Only 4 evaluations across the run
+  eval_trajectory: true  # Full temporal analysis at end

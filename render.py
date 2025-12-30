@@ -8,28 +8,35 @@ import jax.numpy as jp
 
 @functools.partial(jax.jit, static_argnames=['img_size'])
 def draw_particles_2d_fast(positions, particle_colors, map_size, img_size=800):
+    # Use explicit float32 throughout for consistency regardless of x64 mode
     image = jp.zeros((img_size, img_size, 3), dtype=jp.float32)
-    
+
     splat_size = 10
-    gaussian = jp.exp(-jp.linspace(-1, 1, splat_size)**2 / 0.1)
+    linspace = jp.linspace(-1, 1, splat_size, dtype=jp.float32)
+    gaussian = jp.exp(-linspace**2 / 0.1)
     splat_template = jp.outer(gaussian, gaussian)
-    splats = splat_template[..., jp.newaxis] * particle_colors[:, jp.newaxis, jp.newaxis, :]
+
+    # Ensure colors are float32
+    particle_colors_f32 = particle_colors.astype(jp.float32)
+    splats = splat_template[..., jp.newaxis] * particle_colors_f32[:, jp.newaxis, jp.newaxis, :]
     position_coords = (positions * img_size / map_size).astype(jp.int32)
-    
+
     def add_splat(image, inputs):
         position, splat = inputs
         # Extract the region, add splat, then update
         y_start = position[1] - splat_size // 2
         x_start = position[0] - splat_size // 2
-        
+        # Use explicit int32 for channel index to match position dtype
+        zero = jp.int32(0)
+
         current_region = jax.lax.dynamic_slice(
-            image, (y_start, x_start, 0), (splat_size, splat_size, 3)
+            image, (y_start, x_start, zero), (splat_size, splat_size, 3)
         )
         updated_region = current_region + splat
-        
-        image = jax.lax.dynamic_update_slice(image, updated_region, (y_start, x_start, 0))
+
+        image = jax.lax.dynamic_update_slice(image, updated_region, (y_start, x_start, zero))
         return image, None
-    
+
     image, _ = jax.lax.scan(add_splat, image, (position_coords, splats))
     return jp.clip(image, 0, 1)
     

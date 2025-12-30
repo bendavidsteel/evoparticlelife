@@ -1,0 +1,9 @@
+# Baseline experiment to validate bug fixes
+# Tests that mutation parameters are now correctly propagating
+
+name: baseline_test
+num_steps: 50000
+description: "Baseline test with fixed mutation propagation"
+
+vlm_evaluation:
+  enabled: false

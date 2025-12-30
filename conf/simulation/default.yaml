@@ -1,0 +1,24 @@
+# Default simulation parameters
+
+# System parameters
+num_particles: 4000
+species_dim: 2
+box_size: 3.0
+n_dims: 2
+dt: 0.001
+steps_per_frame: 20
+
+# Physics parameters
+mass: 0.02
+half_life: 0.001
+rmax: 0.2
+repulsion_dist: 0.05
+repulsion: 20.0
+
+# Neighbor list parameters
+dr_threshold: 0.01
+capacity_multiplier: 4.0
+
+# Stepping method
+use_while_loop: true  # Use adaptive while loop stepping
+max_steps_per_update: 200  # Maximum steps per update when using while loop

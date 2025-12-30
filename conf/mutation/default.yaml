@@ -1,0 +1,16 @@
+# Mutation parameters for circle-based mutations
+
+mutation_prob: 0.01  # Probability of mutation occurring per update
+min_radius: 0.05     # Minimum mutation circle radius
+max_radius: 0.3      # Maximum mutation circle radius
+
+# Transformation strengths
+noise_strength: 0.3      # Strength of noise transformation
+rotation_enabled: true   # Whether to enable rotation
+scale_min: 0.5          # Minimum scale factor
+scale_max: 1.5          # Maximum scale factor
+
+# Species copying parameters
+max_copy_dist: 0.08
+max_species_dist: 0.2
+copy_prob: 0.001

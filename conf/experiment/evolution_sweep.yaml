@@ -1,0 +1,37 @@
+# Evolution-focused parameter sweep
+# ONLY evolutionary parameters (no mass/rmax changes)
+
+name: evolution_sweep
+num_steps: 4000  # Longer runs to see evolutionary effects
+description: "Explore evolutionary parameters: copy distance, copy prob, mutation rate, species dimensionality"
+
+# VLM evaluation settings
+vlm_evaluation:
+  enabled: false  # Disable by default (enable with command line)
+  eval_frequency: 1500  # Evaluate every N steps
+  eval_trajectory: true  # Evaluate temporal dynamics at end
+
+# Define parameter sweep grid
+sweep:
+  # Species copying parameters
+  max_copy_dist:
+    - 0.04   # Very close neighbors only
+    - 0.08   # Default
+    - 0.15   # Wider copy range
+
+  copy_prob:
+    - 0.0001  # Very rare copying
+    - 0.001   # Default
+    - 0.01    # Frequent copying
+
+  # Mutation parameters
+  mutation_prob:
+    - 0.005   # Low mutation
+    - 0.02    # Medium mutation
+    - 0.05    # High mutation
+
+  # Species dimensionality
+  species_dim:
+    - 2      # Simple
+    - 4      # Complex
+    - 8      # Very complex

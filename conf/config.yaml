@@ -1,0 +1,24 @@
+# Main configuration file for evolutionary particle life experiments
+
+defaults:
+  - simulation: default
+  - mutation: default
+  - metrics: default
+  - experiment: single
+  - _self_
+
+# Wandb configuration
+wandb:
+  entity: benjamin-steel-projects
+  project: evo-particle-life
+  mode: online  # online, offline, or disabled
+
+# Output configuration
+output:
+  dir: ./outputs
+  save_video: true
+  video_fps: 30
+  log_frequency: 10  # Log metrics every N frames
+
+# Random seed
+seed: 42

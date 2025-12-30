@@ -1,0 +1,29 @@
+# Quick exploratory sweep with fixed code
+# Smaller parameter space for faster iteration
+
+name: quick_exploration
+num_steps: 50000
+description: "Quick parameter exploration with fixed mutation propagation"
+
+vlm_evaluation:
+  enabled: false
+
+sweep:
+  # Range of mutation rates to test effect
+  mutation_prob:
+    - 0.001   # Very low
+    - 0.01    # Moderate
+    - 0.05    # High
+
+  # Copy distance range
+  max_copy_dist:
+    - 0.04    # Local
+    - 0.10    # Medium
+
+  # Copy probability
+  copy_prob:
+    - 0.001   # Moderate
+
+  # Species dimensionality
+  species_dim:
+    - 4

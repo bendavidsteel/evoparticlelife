@@ -1,0 +1,26 @@
+# Metrics configuration
+
+# Which metrics to compute
+compute:
+  physics: true         # Momentum, velocities, spatial extent
+  evolutionary: true    # Species diversity, uniqueness, variety
+  behavioral: true      # Activity, spatial structure
+  image_complexity: true  # Visual complexity (edge density, fractal dimension, etc.)
+
+# Species diversity parameters
+species_diversity:
+  binning_threshold: 0.1  # Threshold for unique species detection
+  n_bins: 20              # Number of bins for species discretization
+  pairwise_samples: 1000  # Number of pairs to sample for diversity
+
+# Spatial structure parameters
+nearest_neighbors:
+  k: 5                 # Number of nearest neighbors to consider
+
+spatial_clustering:
+  radius: 0.2          # Radius for clustering coefficient (will use rmax from sim)
+
+# Image complexity parameters (compression-based, from Flow-Lenia paper)
+image_complexity:
+  img_size: 256        # Size of rendered image (256x256 for better pattern capture)
+  eval_frequency: 1000 # Compute every N steps (expensive - higher res + compression)

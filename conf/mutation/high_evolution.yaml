@@ -1,0 +1,15 @@
+# High evolutionary pressure configuration
+
+mutation_prob: 0.05
+min_radius: 0.05
+max_radius: 0.4  # Larger mutation circles
+
+noise_strength: 0.4  # Stronger mutations
+rotation_enabled: true
+scale_min: 0.3
+scale_max: 2.0  # Wider scale range
+
+# Species copying parameters
+max_copy_dist: 0.12  # Wider copy range
+max_species_dist: 0.3  # Allow more diverse copying
+copy_prob: 0.005  # More frequent copying

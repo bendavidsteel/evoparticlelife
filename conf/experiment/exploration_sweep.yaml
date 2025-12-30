@@ -1,0 +1,32 @@
+# Exploratory sweep with fixed code
+# Now that mutation parameters properly propagate, test a wide range
+
+name: exploration_sweep
+num_steps: 100000
+description: "Broad parameter exploration with fixed mutation propagation"
+
+vlm_evaluation:
+  enabled: false
+
+sweep:
+  # Wide range of mutation rates
+  mutation_prob:
+    - 0.001   # Very low - stable evolution
+    - 0.005   # Low
+    - 0.02    # Moderate
+    - 0.05    # High
+
+  # Copy distance range
+  max_copy_dist:
+    - 0.04    # Local
+    - 0.08    # Medium
+    - 0.15    # Wide
+
+  # Copy probability
+  copy_prob:
+    - 0.0005  # Rare
+    - 0.002   # Moderate
+
+  # Species dimensionality
+  species_dim:
+    - 4

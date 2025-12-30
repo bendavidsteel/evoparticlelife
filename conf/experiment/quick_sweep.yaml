@@ -1,0 +1,24 @@
+# Quick parameter sweep for testing
+
+name: quick_sweep
+num_steps: 400
+description: "Quick parameter sweep to explore key parameters"
+
+# Define parameter sweep grid (smaller than full sweep)
+sweep:
+  # Physics parameters
+  mass:
+    - 0.02
+    - 0.05
+
+  # Interaction parameters
+  rmax:
+    - 0.15
+    - 0.2
+    - 0.3
+
+  # Mutation
+  mutation_prob:
+    - 0.005
+    - 0.01
+    - 0.02

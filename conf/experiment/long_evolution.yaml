@@ -1,0 +1,33 @@
+# Long-term evolution experiment
+# Much longer runs to see emergent complexity and diversity
+
+name: long_evolution
+num_steps: 20000  # 5x longer than previous
+description: "Long-term evolutionary dynamics with complexity emergence"
+
+# VLM evaluation settings
+vlm_evaluation:
+  enabled: true  # Enable VLM to track life-likeness over time
+  eval_frequency: 5000  # Evaluate at key checkpoints
+  eval_trajectory: true  # Evaluate full temporal dynamics at end
+
+# Parameter sweep (fewer combinations but longer runs)
+sweep:
+  # Copy parameters - focus on interesting regimes
+  max_copy_dist:
+    - 0.06   # Medium-close neighbors
+    - 0.12   # Medium-far neighbors
+
+  copy_prob:
+    - 0.002   # Moderate copying
+    - 0.008   # Higher copying
+
+  # Mutation parameters - explore diversity/stability trade-off
+  mutation_prob:
+    - 0.01    # Low mutation (stability)
+    - 0.04    # High mutation (diversity)
+
+  # Species dimensionality
+  species_dim:
+    - 3      # Medium complexity
+    - 6      # High complexity

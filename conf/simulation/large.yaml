@@ -1,0 +1,21 @@
+# Large simulation for detailed exploration
+
+# @package _global_.simulation
+num_particles: 8000
+species_dim: 4
+box_size: 4.0
+n_dims: 2
+dt: 0.001
+steps_per_frame: 20
+
+mass: 0.02
+half_life: 0.001
+rmax: 0.25
+repulsion_dist: 0.05
+repulsion: 20.0
+
+dr_threshold: 0.01
+capacity_multiplier: 5.0
+
+use_while_loop: true
+max_steps_per_update: 300

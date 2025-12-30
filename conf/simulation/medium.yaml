@@ -1,0 +1,24 @@
+# Medium simulation - balanced for GPU memory
+# Fits on 4GB GPU without OOM
+
+num_particles: 4000  # Moderate size
+species_dim: 2
+box_size: 3.0
+n_dims: 2
+dt: 0.001
+steps_per_frame: 20
+
+# Physics parameters
+mass: 0.02
+half_life: 0.001
+rmax: 0.2
+repulsion_dist: 0.05
+repulsion: 20.0
+
+# Neighbor list parameters (conservative for memory)
+dr_threshold: 0.01
+capacity_multiplier: 3.0  # Reduced from 5.0
+
+# Stepping method
+use_while_loop: true
+max_steps_per_update: 200

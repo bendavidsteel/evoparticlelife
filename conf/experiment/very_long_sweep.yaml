@@ -1,0 +1,30 @@
+# Very long parameter sweep
+# Much fewer combinations, but MUCH longer runs to see real evolutionary dynamics
+
+name: very_long_sweep
+num_steps: 100000  # 25x longer than original - expect 10-20 min per run
+description: "Long-term evolutionary exploration with fewer but deeper parameter tests"
+
+# VLM evaluation settings
+vlm_evaluation:
+  enabled: false  # Disable for speed, can enable manually
+  eval_frequency: 25000
+  eval_trajectory: false
+
+# Minimal sweep - only 8 combinations but MUCH longer
+sweep:
+  # Focus on most interesting evolutionary parameters
+  max_copy_dist:
+    - 0.08   # Medium range
+    - 0.15   # Wide range
+
+  copy_prob:
+    - 0.001  # Conservative copying
+    - 0.01   # Aggressive copying
+
+  mutation_prob:
+    - 0.01   # Low mutation
+    - 0.05   # High mutation
+
+  species_dim:
+    - 4      # Medium complexity
