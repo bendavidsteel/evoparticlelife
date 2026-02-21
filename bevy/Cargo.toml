@@ -1,0 +1,26 @@
+[package]
+name = "simplelife"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nannou = { path = "/home/ben/Projects/personal/repos/nannou/nannou", features = ["egui"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nannou_audio = { path = "/home/ben/Projects/personal/repos/nannou/nannou_audio" }
+ringbuf = "0.4"
+crossbeam-channel = "0.5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console", "Window"] }
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
