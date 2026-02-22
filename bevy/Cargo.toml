@@ -8,13 +8,14 @@ nannou = { path = "/home/ben/Projects/personal/repos/nannou/nannou", features = 
 bytemuck = { version = "1.14", features = ["derive"] }
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
+ringbuf = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nannou_audio = { path = "/home/ben/Projects/personal/repos/nannou/nannou_audio" }
-ringbuf = "0.4"
 crossbeam-channel = "0.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { version = "0.17", features = ["wasm-bindgen"] }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["console", "Window"] }
 console_error_panic_hook = "0.1"

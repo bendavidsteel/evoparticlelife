@@ -1,8 +1,9 @@
 use nannou::prelude::*;
 use nannou::wgpu::BufferInitDescriptor;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI8, Ordering};
 use image::ImageReader;
+use ringbuf::{traits::{Consumer, Producer, Split, Observer}, HeapRb};
 
 #[cfg(not(target_arch = "wasm32"))]
 use nannou_audio as audio;
@@ -11,26 +12,19 @@ use nannou_audio::Buffer;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicI8;
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam_channel::{self, Receiver};
-#[cfg(not(target_arch = "wasm32"))]
-use ringbuf::{traits::{Consumer, Producer, Split, Observer}, HeapRb};
+
+#[cfg(target_arch = "wasm32")]
+use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
 
 const NUM_PARTICLES: u32 = 8192;
-#[cfg(not(target_arch = "wasm32"))]
 const NUM_CHANNELS: u32 = 2;
-#[cfg(not(target_arch = "wasm32"))]
 const SAMPLE_RATE: u32 = 44100;
-#[cfg(not(target_arch = "wasm32"))]
 const CHUNK_SIZE: u32 = 2048;
-#[cfg(not(target_arch = "wasm32"))]
-const NUM_AUDIO_STAGING_BUFS: usize = 4; // Triple-buffered to avoid "buffer still mapped" race
-#[cfg(not(target_arch = "wasm32"))]
+const NUM_AUDIO_STAGING_BUFS: usize = 4;
 const CHUNK_FLOATS: u32 = CHUNK_SIZE * NUM_CHANNELS;
-#[cfg(not(target_arch = "wasm32"))]
 const INITIAL_REQUEST_THRESHOLD: u32 = CHUNK_FLOATS * 2;
 #[cfg(not(target_arch = "wasm32"))]
 const MIN_REQUEST_THRESHOLD: u32 = CHUNK_FLOATS;
@@ -51,10 +45,8 @@ const AUDIO_LOG_INTERVAL_FRAMES: u64 = 60; // Log audio stats every ~1 second at
 
 // Shader sources (loaded at compile time)
 const PARTICLE_SHADER: &str = concat!(include_str!("shaders/common.wgsl"), include_str!("shaders/particle.wgsl"));
-#[cfg(not(target_arch = "wasm32"))]
 const AUDIO_SHADER: &str = concat!(include_str!("shaders/common.wgsl"), include_str!("shaders/audio.wgsl"));
 const RENDER_SHADER: &str = concat!(include_str!("shaders/common.wgsl"), include_str!("shaders/render.wgsl"));
-#[cfg(not(target_arch = "wasm32"))]
 const PHASE_UPDATE_SHADER: &str = concat!(include_str!("shaders/common.wgsl"), include_str!("shaders/phase_update.wgsl"));
 const BIN_FILL_SIZE_SHADER: &str = concat!(include_str!("shaders/common.wgsl"), include_str!("shaders/bin_fill_size.wgsl"));
 const BIN_PREFIX_SUM_SHADER: &str = include_str!("shaders/bin_prefix_sum.wgsl");
@@ -101,7 +93,6 @@ struct SimParams {
     _pad: f32
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct AudioParams {
@@ -213,20 +204,13 @@ struct Compute {
     particle_bind_groups: [Arc<wgpu::BindGroup>; 2],
     particle_pipeline: Arc<wgpu::ComputePipeline>,
 
-    #[cfg(not(target_arch = "wasm32"))]
     audio_out_buf: Arc<wgpu::Buffer>,
-    #[cfg(not(target_arch = "wasm32"))]
     audio_staging_bufs: Vec<Arc<wgpu::Buffer>>,
-    #[cfg(not(target_arch = "wasm32"))]
     audio_params_buf: Arc<wgpu::Buffer>,
-    #[cfg(not(target_arch = "wasm32"))]
     audio_bind_groups: [Arc<wgpu::BindGroup>; 2],
-    #[cfg(not(target_arch = "wasm32"))]
     audio_pipeline: Arc<wgpu::ComputePipeline>,
 
-    #[cfg(not(target_arch = "wasm32"))]
     phase_update_bind_groups: [Arc<wgpu::BindGroup>; 2],
-    #[cfg(not(target_arch = "wasm32"))]
     phase_update_pipeline: Arc<wgpu::ComputePipeline>,
 
     spatial_hash: SpatialHash,
@@ -264,12 +248,28 @@ struct Model {
     render: Render,
     trail: Trail,
 
-    #[cfg(not(target_arch = "wasm32"))]
+    // Audio pipeline state (universal)
     audio_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
+    audio_active: bool,
+    request_threshold: u32,
+    last_buffer_level: u32,
+    last_audio_staging_idx: Arc<AtomicI8>,
+
+    // Native audio output
     #[cfg(not(target_arch = "wasm32"))]
     audio_feedback_rx: Arc<Receiver<AudioFeedback>>,
     #[cfg(not(target_arch = "wasm32"))]
     _audio_thread: Arc<JoinHandle<()>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    integral_error: f32,
+    #[cfg(not(target_arch = "wasm32"))]
+    latest_feedback: Option<AudioFeedback>,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_log_frame: u64,
+
+    // WASM audio output (cpal)
+    #[cfg(target_arch = "wasm32")]
+    audio_stream: Arc<cpal::Stream>,
 
     window: Entity,
     settings: Settings,
@@ -288,21 +288,6 @@ struct Model {
     current_y1: f32,
 
     prev_viewport: Arc<Mutex<[f32; 4]>>,
-
-    #[cfg(not(target_arch = "wasm32"))]
-    request_threshold: u32,
-    #[cfg(not(target_arch = "wasm32"))]
-    integral_error: f32,
-    #[cfg(not(target_arch = "wasm32"))]
-    latest_feedback: Option<AudioFeedback>,
-    #[cfg(not(target_arch = "wasm32"))]
-    last_buffer_level: u32,
-
-    #[cfg(not(target_arch = "wasm32"))]
-    last_log_frame: u64,
-
-    #[cfg(not(target_arch = "wasm32"))]
-    last_audio_staging_idx: Arc<AtomicI8>,
 
     current_buffer_idx: Arc<std::sync::atomic::AtomicUsize>,
 
@@ -375,15 +360,14 @@ fn model(app: &App) -> Model {
     let device = window.device();
     let queue = window.queue();
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let (audio_producer, audio_feedback_rx, audio_thread) = {
-        // Create ring buffer for lock-free audio transfer
-        // Size: enough for ~32 update frames worth of audio
-        let ring_buf_size = CHUNK_SIZE as usize * NUM_CHANNELS as usize * 32;
-        let ring_buf = HeapRb::<f32>::new(ring_buf_size);
-        let (audio_producer, audio_consumer) = ring_buf.split();
+    // Create ring buffer for lock-free audio transfer (universal)
+    let ring_buf_size = CHUNK_SIZE as usize * NUM_CHANNELS as usize * 32;
+    let ring_buf = HeapRb::<f32>::new(ring_buf_size);
+    let (audio_producer, audio_consumer) = ring_buf.split();
 
-        // Start audio stream on a separate thread
+    // Native: start audio stream on a separate thread via nannou_audio
+    #[cfg(not(target_arch = "wasm32"))]
+    let (audio_feedback_rx, audio_thread) = {
         let audio_host = audio::Host::new();
         let (audio_feedback_tx, audio_feedback_rx) = crossbeam_channel::unbounded();
 
@@ -409,7 +393,33 @@ fn model(app: &App) -> Model {
             }
         });
 
-        (audio_producer, audio_feedback_rx, audio_thread)
+        (audio_feedback_rx, audio_thread)
+    };
+
+    // WASM: create cpal output stream (starts suspended until user gesture)
+    #[cfg(target_arch = "wasm32")]
+    let audio_stream = {
+        let host = cpal::default_host();
+        let device = host.default_output_device().expect("no audio output device");
+        let config = cpal::StreamConfig {
+            channels: NUM_CHANNELS as u16,
+            sample_rate: SAMPLE_RATE,
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let mut consumer = audio_consumer;
+        let stream = device.build_output_stream(
+            &config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for sample in data.iter_mut() {
+                    *sample = consumer.try_pop().unwrap_or(0.0);
+                }
+            },
+            |err| {
+                web_sys::console::error_1(&format!("audio error: {err}").into());
+            },
+            None,
+        ).expect("failed to build audio stream");
+        stream
     };
 
     let map_x0 = -8.0;
@@ -522,8 +532,7 @@ fn model(app: &App) -> Model {
     // Note: particle_bind_group_layout, particle_bind_group, and particle_pipeline
     // are created after spatial hash buffers since they depend on bin_offset_buf
 
-    // Audio compute pipeline (native only)
-    #[cfg(not(target_arch = "wasm32"))]
+    // Audio compute pipeline
     let audio_out_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("audio_out"),
         size: (CHUNK_SIZE * NUM_CHANNELS * std::mem::size_of::<f32>() as u32) as u64,
@@ -531,7 +540,6 @@ fn model(app: &App) -> Model {
         mapped_at_creation: false,
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let audio_staging_bufs: Vec<Arc<wgpu::Buffer>> = (0..NUM_AUDIO_STAGING_BUFS)
         .map(|i| {
             Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -543,7 +551,6 @@ fn model(app: &App) -> Model {
         })
         .collect();
 
-    #[cfg(not(target_arch = "wasm32"))]
     let audio_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("audio_params"),
         size: std::mem::size_of::<AudioParams>() as u64,
@@ -551,41 +558,34 @@ fn model(app: &App) -> Model {
         mapped_at_creation: false,
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let audio_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("audio_shader"),
         source: wgpu::ShaderSource::Wgsl(AUDIO_SHADER.into()),
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let audio_out_size = (CHUNK_SIZE * NUM_CHANNELS * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("phase_update_shader"),
         source: wgpu::ShaderSource::Wgsl(PHASE_UPDATE_SHADER.into()),
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_bind_group_layout = wgpu::BindGroupLayoutBuilder::new()
         .storage_buffer(wgpu::ShaderStages::COMPUTE, false, false) // particles read-write
         .uniform_buffer(wgpu::ShaderStages::COMPUTE, false)
         .build(&device);
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_bind_group_a = wgpu::BindGroupBuilder::new()
         .buffer_bytes(&particles_buf, 0, std::num::NonZeroU64::new(particles_buf_size))
         .buffer::<AudioParams>(&audio_params_buf, 0..1)
         .build(&device, &phase_update_bind_group_layout);
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("phase_update_pl"),
         bind_group_layouts: &[&phase_update_bind_group_layout],
         push_constant_ranges: &[],
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("phase_update_pipeline"),
         layout: Some(&phase_update_pipeline_layout),
@@ -633,7 +633,6 @@ fn model(app: &App) -> Model {
         mapped_at_creation: false,
     });
 
-    #[cfg(not(target_arch = "wasm32"))]
     let phase_update_bind_group_b = wgpu::BindGroupBuilder::new()
         .buffer_bytes(&particles_sorted_buf, 0, std::num::NonZeroU64::new(particles_buf_size))
         .buffer::<AudioParams>(&audio_params_buf, 0..1)
@@ -856,8 +855,7 @@ fn model(app: &App) -> Model {
         cache: None,
     });
 
-    // Audio bind groups and pipeline (native only)
-    #[cfg(not(target_arch = "wasm32"))]
+    // Audio bind groups and pipeline
     let (audio_bind_group_a, audio_bind_group_b, audio_pipeline) = {
         let audio_bind_group_layout = wgpu::BindGroupLayoutBuilder::new()
             .storage_buffer(wgpu::ShaderStages::COMPUTE, false, true)  // particles read-only
@@ -946,19 +944,12 @@ fn model(app: &App) -> Model {
         sim_params_buf: Arc::new(sim_params_buf),
         particle_bind_groups: [Arc::new(particle_bind_group_a), Arc::new(particle_bind_group_b)],
         particle_pipeline: Arc::new(particle_pipeline),
-        #[cfg(not(target_arch = "wasm32"))]
         audio_out_buf: Arc::new(audio_out_buf),
-        #[cfg(not(target_arch = "wasm32"))]
         audio_staging_bufs,
-        #[cfg(not(target_arch = "wasm32"))]
         audio_params_buf: Arc::new(audio_params_buf),
-        #[cfg(not(target_arch = "wasm32"))]
         audio_bind_groups: [Arc::new(audio_bind_group_a), Arc::new(audio_bind_group_b)],
-        #[cfg(not(target_arch = "wasm32"))]
         audio_pipeline: Arc::new(audio_pipeline),
-        #[cfg(not(target_arch = "wasm32"))]
         phase_update_bind_groups: [Arc::new(phase_update_bind_group_a), Arc::new(phase_update_bind_group_b)],
-        #[cfg(not(target_arch = "wasm32"))]
         phase_update_pipeline: Arc::new(phase_update_pipeline),
         spatial_hash,
     };
@@ -1282,12 +1273,23 @@ fn model(app: &App) -> Model {
         compute,
         render,
         trail,
-        #[cfg(not(target_arch = "wasm32"))]
         audio_producer: Arc::new(Mutex::new(audio_producer)),
+        audio_active: cfg!(not(target_arch = "wasm32")), // native: on by default, WASM: off until user gesture
+        request_threshold: INITIAL_REQUEST_THRESHOLD,
+        last_buffer_level: 0,
+        last_audio_staging_idx: Arc::new(AtomicI8::new(-1)),
         #[cfg(not(target_arch = "wasm32"))]
         audio_feedback_rx: Arc::new(audio_feedback_rx),
         #[cfg(not(target_arch = "wasm32"))]
         _audio_thread: Arc::new(audio_thread),
+        #[cfg(not(target_arch = "wasm32"))]
+        integral_error: 0.0,
+        #[cfg(not(target_arch = "wasm32"))]
+        latest_feedback: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        last_log_frame: 0,
+        #[cfg(target_arch = "wasm32")]
+        audio_stream: Arc::new(audio_stream),
         window: w_id,
         settings: Settings {
             volume: 1.0,
@@ -1314,18 +1316,6 @@ fn model(app: &App) -> Model {
         current_y0,
         current_y1,
         prev_viewport: Arc::new(Mutex::new([current_x0, current_x1, current_y0, current_y1])),
-        #[cfg(not(target_arch = "wasm32"))]
-        request_threshold: INITIAL_REQUEST_THRESHOLD,
-        #[cfg(not(target_arch = "wasm32"))]
-        integral_error: 0.0,
-        #[cfg(not(target_arch = "wasm32"))]
-        latest_feedback: None,
-        #[cfg(not(target_arch = "wasm32"))]
-        last_buffer_level: 0,
-        #[cfg(not(target_arch = "wasm32"))]
-        last_log_frame: 0,
-        #[cfg(not(target_arch = "wasm32"))]
-        last_audio_staging_idx: Arc::new(AtomicI8::new(-1)),
         current_buffer_idx: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pan_vel_x: 0.0,
         pan_vel_y: 0.0,
@@ -1480,6 +1470,15 @@ fn update(app: &App, model: &mut Model) {
     let ctx = egui_ctx.get_mut();
 
     egui::Window::new("Settings").show(&ctx, |ui| {
+        // Audio toggle button
+        let audio_label = if model.audio_active { "Mute Audio" } else { "Start Audio" };
+        if ui.button(audio_label).clicked() {
+            model.audio_active = !model.audio_active;
+            #[cfg(target_arch = "wasm32")]
+            if model.audio_active {
+                let _ = model.audio_stream.play();
+            }
+        }
         ui.add(egui::Slider::new(&mut model.settings.volume, 0.0..=2.0).text("volume"));
         ui.add(egui::Slider::new(&mut model.settings.dt, 0.001..=0.1).text("dt"));
         ui.add(egui::Slider::new(&mut model.settings.friction, 0.0..=1.0).text("friction"));
@@ -1540,6 +1539,14 @@ fn update(app: &App, model: &mut Model) {
         if let Some(feedback) = latest_feedback {
             model.last_buffer_level = feedback.current_buffer_level;
             model.latest_feedback = Some(feedback);
+        }
+    }
+
+    // WASM: check buffer level directly from producer (single-threaded, no feedback channel needed)
+    #[cfg(target_arch = "wasm32")]
+    if model.audio_active {
+        if let Ok(producer) = model.audio_producer.lock() {
+            model.last_buffer_level = producer.occupied_len() as u32;
         }
     }
 
@@ -1650,8 +1657,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
     };
     update_buffer(device, &mut encoder, &*model.compute.sim_params_buf, &sim_params);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
+    if model.audio_active {
         let audio_params = AudioParams {
             sample_rate: SAMPLE_RATE as f32,
             num_particles: NUM_PARTICLES,
@@ -1688,7 +1694,6 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
     };
     update_buffer(device, &mut encoder, &*model.trail.reproject_params_buf, &reproject_params);
 
-    #[cfg(not(target_arch = "wasm32"))]
     let audio_buf_size = (CHUNK_SIZE * NUM_CHANNELS * std::mem::size_of::<f32>() as u32) as u64;
 
     // ==================== Spatial Hashing Passes ====================
@@ -1797,8 +1802,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
         pass.dispatch_workgroups((NUM_PARTICLES + 63) / 64, 1, 1);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
+    if model.audio_active {
         let need_audio = model.last_buffer_level < model.request_threshold;
 
         // Read back audio from previous frame if there was any

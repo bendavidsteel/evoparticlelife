@@ -30,7 +30,8 @@ python3 -m http.server 8080 --directory dist
 
 ### WASM Notes
 
-- Audio is disabled in the WASM build (guarded by `#[cfg(not(target_arch = "wasm32"))]`).
+- Audio is supported in the WASM build via cpal with the `wasm-bindgen` feature (Web Audio API backend). The GPU audio pipeline is shared with native. The user must click "Start Audio" in the Settings panel to begin playback (required by browser autoplay policy).
+- On native, audio uses nannou_audio (wrapping cpal 0.13). On WASM, cpal 0.17 is used directly.
 - Trunk's built-in wasm-opt pass is disabled (`data-wasm-opt="0"` in index.html) because it doesn't pass the required `--enable-bulk-memory` and `--enable-nontrapping-float-to-int` flags for the WASM features emitted by Rust with LTO. The `build-wasm.sh` script runs wasm-opt manually with the correct flags.
 - Requires a browser with WebGPU support (Chrome/Edge).
 
