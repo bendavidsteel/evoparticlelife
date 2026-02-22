@@ -153,7 +153,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                   * smoothstep(core_radius + membrane_width, core_radius, dist);
 
     // Glow (unchanged from original)
-    let glow = pow(1.0 - glow_dist, 2.0) * (0.5 - 0.2 * scaled_energy);
+    let glow = pow(1.0 - glow_dist, 2.0) * (0.5 + 0.2 * scaled_energy);
 
     // Sample blue noise for organic texture
     // Scale UV so each particle covers a visible patch of the noise texture
