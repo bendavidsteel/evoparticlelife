@@ -12,7 +12,7 @@ wasm-opt \
     --enable-nontrapping-float-to-int \
     --enable-sign-ext \
     --enable-mutable-globals \
-    -Oz \
+    -O3 \
     -o "${WASM_FILE}.opt" \
     "$WASM_FILE"
 mv "${WASM_FILE}.opt" "$WASM_FILE"
