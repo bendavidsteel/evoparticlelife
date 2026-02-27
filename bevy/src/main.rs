@@ -171,16 +171,14 @@ struct SpatialHash {
     // Buffers for spatial hashing
     bin_size_buf: Arc<wgpu::Buffer>,
     bin_offset_buf: Arc<wgpu::Buffer>,          // Result of prefix sum
-    bin_offset_tmp_buf: Arc<wgpu::Buffer>,      // Temp buffer for prefix sum ping-pong
-    prefix_sum_step_buf: Arc<wgpu::Buffer>,     // Uniform for step size
 
     // Bind groups for fill_bin_size - dual for ping-pong [A, B]
     // Note: clear_bin_size uses the same bind groups
     fill_bin_size_particles_bind_groups: [Arc<wgpu::BindGroup>; 2],
     fill_bin_size_params_bind_group: Arc<wgpu::BindGroup>,
     fill_bin_size_bins_bind_group: Arc<wgpu::BindGroup>,
-    // Bind groups for prefix sum (ping-pong: 0=size->offset, 1=offset->tmp, 2=tmp->offset)
-    prefix_sum_bind_groups: [Arc<wgpu::BindGroup>; 3],
+    // Bind group for single-pass prefix sum (bin_size -> bin_offset)
+    prefix_sum_bind_group: Arc<wgpu::BindGroup>,
     // Bind groups for sort particles - dual for ping-pong [A, B]
     sort_particles_data_bind_groups: [Arc<wgpu::BindGroup>; 2],
     sort_particles_params_bind_group: Arc<wgpu::BindGroup>,
@@ -617,14 +615,6 @@ fn model(app: &App) -> Model {
         mapped_at_creation: false,
     });
 
-    // Temp buffer for prefix sum ping-pong
-    let bin_offset_tmp_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("bin_offset_tmp"),
-        size: bin_buf_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
     // Sorted particles buffer
     let particles_sorted_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("particles_sorted"),
@@ -637,14 +627,6 @@ fn model(app: &App) -> Model {
         .buffer_bytes(&particles_sorted_buf, 0, std::num::NonZeroU64::new(particles_buf_size))
         .buffer::<AudioParams>(&audio_params_buf, 0..1)
         .build(&device, &phase_update_bind_group_layout);
-
-    // Prefix sum step size uniform
-    let prefix_sum_step_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("prefix_sum_step"),
-        size: std::mem::size_of::<u32>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
 
     // Load spatial hashing shaders
     let bin_fill_size_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -717,32 +699,15 @@ fn model(app: &App) -> Model {
         cache: None,
     });
 
-    // Prefix sum bind groups (ping-pong between two buffers)
+    // Prefix sum bind group (single-pass: bin_size -> bin_offset)
     let prefix_sum_bind_group_layout = wgpu::BindGroupLayoutBuilder::new()
         .storage_buffer(wgpu::ShaderStages::COMPUTE, false, true)  // source (read-only)
         .storage_buffer(wgpu::ShaderStages::COMPUTE, false, false) // destination
-        .uniform_buffer(wgpu::ShaderStages::COMPUTE, false)        // stepSize
         .build(&device);
 
-    // Bind group 0: bin_size -> bin_offset (first iteration)
-    let prefix_sum_bind_group_0 = wgpu::BindGroupBuilder::new()
+    let prefix_sum_bind_group = wgpu::BindGroupBuilder::new()
         .buffer_bytes(&bin_size_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
         .buffer_bytes(&bin_offset_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
-        .buffer::<u32>(&prefix_sum_step_buf, 0..1)
-        .build(&device, &prefix_sum_bind_group_layout);
-
-    // Bind group 1: bin_offset -> bin_offset_tmp
-    let prefix_sum_bind_group_1 = wgpu::BindGroupBuilder::new()
-        .buffer_bytes(&bin_offset_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
-        .buffer_bytes(&bin_offset_tmp_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
-        .buffer::<u32>(&prefix_sum_step_buf, 0..1)
-        .build(&device, &prefix_sum_bind_group_layout);
-
-    // Bind group 2: bin_offset_tmp -> bin_offset
-    let prefix_sum_bind_group_2 = wgpu::BindGroupBuilder::new()
-        .buffer_bytes(&bin_offset_tmp_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
-        .buffer_bytes(&bin_offset_buf, 0, std::num::NonZeroU64::new(bin_buf_size))
-        .buffer::<u32>(&prefix_sum_step_buf, 0..1)
         .build(&device, &prefix_sum_bind_group_layout);
 
     let prefix_sum_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -755,7 +720,7 @@ fn model(app: &App) -> Model {
         label: Some("prefix_sum_pipeline"),
         layout: Some(&prefix_sum_pipeline_layout),
         module: &bin_prefix_sum_shader,
-        entry_point: Some("prefixSumStep"),
+        entry_point: Some("prefixSum"),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -921,12 +886,10 @@ fn model(app: &App) -> Model {
     let spatial_hash = SpatialHash {
         bin_size_buf: Arc::new(bin_size_buf),
         bin_offset_buf: Arc::new(bin_offset_buf),
-        bin_offset_tmp_buf: Arc::new(bin_offset_tmp_buf),
-        prefix_sum_step_buf: Arc::new(prefix_sum_step_buf),
         fill_bin_size_particles_bind_groups: [Arc::new(fill_bin_size_particles_bind_group_a), Arc::new(fill_bin_size_particles_bind_group_b)],
         fill_bin_size_params_bind_group: Arc::new(fill_bin_size_params_bind_group),
         fill_bin_size_bins_bind_group: Arc::new(fill_bin_size_bins_bind_group),
-        prefix_sum_bind_groups: [Arc::new(prefix_sum_bind_group_0), Arc::new(prefix_sum_bind_group_1), Arc::new(prefix_sum_bind_group_2)],
+        prefix_sum_bind_group: Arc::new(prefix_sum_bind_group),
         sort_particles_data_bind_groups: [Arc::new(sort_particles_data_bind_group_a), Arc::new(sort_particles_data_bind_group_b)],
         sort_particles_params_bind_group: Arc::new(sort_particles_params_bind_group),
         clear_bin_size_pipeline: Arc::new(clear_bin_size_pipeline),
@@ -1579,25 +1542,9 @@ fn audio_fn(audio: &mut AudioModel, buffer: &mut Buffer) {
     }).ok();
 }
 
-/// Helper to update a GPU buffer via staging buffer copy.
-/// Returns the staging buffer which must be kept alive until the encoder is submitted.
-fn update_buffer<T: bytemuck::Pod>(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    dest: &wgpu::Buffer,
-    data: &T,
-) {
-    let bytes = bytemuck::bytes_of(data);
-    let staging = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("staging"),
-        contents: bytes,
-        usage: wgpu::BufferUsages::COPY_SRC,
-    });
-    encoder.copy_buffer_to_buffer(&staging, 0, dest, 0, bytes.len() as u64);
-}
-
 fn render(_app: &RenderApp, model: &Model, frame: Frame) {
-    let device = frame.device();
+    let _device = frame.device();
+    let queue = frame.queue();
 
     // Ping-pong buffer indices:
     // src_idx = current buffer (where data is now)
@@ -1626,7 +1573,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
         max_speed,
         energy_scale,
     };
-    update_buffer(device, &mut encoder, &*model.render.render_params_buf, &render_params);
+    queue.write_buffer(&*model.render.render_params_buf, 0, bytemuck::bytes_of(&render_params));
 
     // Calculate bin counts
     let num_bins_x = ((model.map_x1 - model.map_x0) / BIN_SIZE).ceil() as u32;
@@ -1655,7 +1602,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
         copy_probability: model.settings.copy_probability,
         _pad: 0.0
     };
-    update_buffer(device, &mut encoder, &*model.compute.sim_params_buf, &sim_params);
+    queue.write_buffer(&*model.compute.sim_params_buf, 0, bytemuck::bytes_of(&sim_params));
 
     if model.audio_active {
         let audio_params = AudioParams {
@@ -1674,7 +1621,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
             energy_scale,
             _pad: 0,
         };
-        update_buffer(device, &mut encoder, &*model.compute.audio_params_buf, &audio_params);
+        queue.write_buffer(&*model.compute.audio_params_buf, 0, bytemuck::bytes_of(&audio_params));
     }
 
     // Update reproject params for trail reprojection
@@ -1692,7 +1639,7 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
         _pad2: 0.0,
         _pad3: 0.0,
     };
-    update_buffer(device, &mut encoder, &*model.trail.reproject_params_buf, &reproject_params);
+    queue.write_buffer(&*model.trail.reproject_params_buf, 0, bytemuck::bytes_of(&reproject_params));
 
     let audio_buf_size = (CHUNK_SIZE * NUM_CHANNELS * std::mem::size_of::<f32>() as u32) as u64;
 
@@ -1727,40 +1674,15 @@ fn render(_app: &RenderApp, model: &Model, frame: Frame) {
         pass.dispatch_workgroups((NUM_PARTICLES + 63) / 64, 1, 1);
     }
 
-    // Step 3: Prefix sum (compute bin offsets)
-    let num_prefix_sum_steps = (num_bins_total as f32).log2().ceil() as u32;
-
-    for i in 0..num_prefix_sum_steps {
-        let step_size = 1u32 << i;
-        update_buffer(device, &mut encoder, &*sh.prefix_sum_step_buf, &step_size);
-
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("prefix_sum_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&*sh.prefix_sum_pipeline);
-
-            let bind_group_idx = if i == 0 {
-                0  // bin_size -> bin_offset
-            } else if i % 2 == 1 {
-                1  // bin_offset -> bin_offset_tmp
-            } else {
-                2  // bin_offset_tmp -> bin_offset
-            };
-            pass.set_bind_group(0, &*sh.prefix_sum_bind_groups[bind_group_idx], &[]);
-            pass.dispatch_workgroups((num_bins_total + 63) / 64, 1, 1);
-        }
-    }
-
-    if num_prefix_sum_steps > 1 && num_prefix_sum_steps % 2 == 0 {
-        encoder.copy_buffer_to_buffer(
-            &*sh.bin_offset_tmp_buf,
-            0,
-            &*sh.bin_offset_buf,
-            0,
-            ((sh.num_bins + 1) * std::mem::size_of::<u32>() as u32) as u64,
-        );
+    // Step 3: Prefix sum (single-pass shared memory)
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("prefix_sum_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&*sh.prefix_sum_pipeline);
+        pass.set_bind_group(0, &*sh.prefix_sum_bind_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
     }
 
     // Step 4: Clear bin sizes again (for sort counting)
