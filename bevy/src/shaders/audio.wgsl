@@ -3,7 +3,7 @@
 @group(0) @binding(2) var<uniform> params: AudioParams;
 @group(0) @binding(3) var<storage, read> bin_offset: array<u32>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.chunk_size {
         return;
@@ -24,11 +24,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let view_width = view_right - view_left;
     let view_height = view_top - view_bottom;
 
-    // Calculate which bins overlap the viewport
-    let min_bin_x = u32(max(0.0, (view_left - params.map_x0) / params.bin_size));
-    let max_bin_x = min(params.num_bins_x - 1u, u32((view_right - params.map_x0) / params.bin_size));
-    let min_bin_y = u32(max(0.0, (view_bottom - params.map_y0) / params.bin_size));
-    let max_bin_y = min(params.num_bins_y - 1u, u32((view_top - params.map_y0) / params.bin_size));
+    // Soft edge margin: 10% of viewport size outside each edge
+    let margin_x = view_width * 0.1;
+    let margin_y = view_height * 0.1;
+
+    // Calculate which bins overlap the viewport + margin
+    let min_bin_x = u32(max(0.0, (view_left - margin_x - params.map_x0) / params.bin_size));
+    let max_bin_x = min(params.num_bins_x - 1u, u32((view_right + margin_x - params.map_x0) / params.bin_size));
+    let min_bin_y = u32(max(0.0, (view_bottom - margin_y - params.map_y0) / params.bin_size));
+    let max_bin_y = min(params.num_bins_y - 1u, u32((view_top + margin_y - params.map_y0) / params.bin_size));
 
     // Iterate over bins that overlap the viewport
     for (var bin_y = min_bin_y; bin_y <= max_bin_y; bin_y++) {
@@ -41,24 +45,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             for (var i = start_idx; i < end_idx; i++) {
                 let p = particles[i];
 
-                // Double-check particle is in viewport (bin may extend beyond viewport edge)
-                if (p.pos.x < view_left || p.pos.x > view_right ||
-                    p.pos.y < view_bottom || p.pos.y > view_top) {
+                // Soft edge gain: 1.0 inside viewport, linear ramp from 0 to 1 in the margin zone
+                let gain_x = clamp(
+                    min((p.pos.x - (view_left - margin_x)) / margin_x,
+                        ((view_right + margin_x) - p.pos.x) / margin_x),
+                    0.0, 1.0);
+                let gain_y = clamp(
+                    min((p.pos.y - (view_bottom - margin_y)) / margin_y,
+                        ((view_top + margin_y) - p.pos.y) / margin_y),
+                    0.0, 1.0);
+                let edge_gain = gain_x * gain_y;
+                if (edge_gain <= 0.0) {
                     continue;
                 }
 
-                // Normalize position within viewport (0 to 1)
-                let norm_x = (p.pos.x - view_left) / view_width;
-                let norm_y = (p.pos.y - view_bottom) / view_height;
+                // Normalize position within viewport (0 to 1, clamped for margin particles)
+                let norm_x = clamp((p.pos.x - view_left) / view_width, 0.0, 1.0);
+                let norm_y = clamp((p.pos.y - view_bottom) / view_height, 0.0, 1.0);
 
                 // Compute waveform
                 let phase = compute_phase(p, t, params.energy_scale);
                 let osc = compute_oscillator(phase);
                 let amp = compute_amplitude(p, t, params.max_speed, params.energy_scale);
                 let amp_mod = 0.2 + 0.8 * compute_oscillator(compute_amp_phase(p, t, params.energy_scale));
-                let amp_final = amp * amp_mod;
+                let amp_final = amp * amp_mod * edge_gain;
 
-                visible_amp += amp;
+                visible_amp += amp * edge_gain;
 
                 // Stereo pan based on x position within viewport
                 left += osc * amp_final * (1.0 - norm_x);
