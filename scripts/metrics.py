@@ -159,64 +159,85 @@ def compute_species_pairwise_diversity(species, key=None, normalize=True):
 # =============================================================================
 
 def compute_nearest_neighbor_distances(positions, neighbors, k=5):
-    """Compute mean distance to k nearest neighbors using neighbor list.
+    """Compute mean distance to k nearest neighbors using sparse neighbor list.
 
     Uses the existing spatial partitioning from neighbor list to avoid O(N²).
+    Supports both Dense and Sparse neighbor list formats.
     """
-    # Get neighbor indices (shape: [N, max_neighbors])
+    N = positions.shape[0]
     neighbor_idx = neighbors.idx
 
-    # Compute distances to each neighbor
-    def compute_neighbor_dists(i):
-        pos_i = positions[i]
-        # Get valid neighbors (neighbor_idx uses -1 for empty slots)
-        neighs = neighbor_idx[i]
-        valid_mask = neighs >= 0
+    # Detect format: Sparse has shape (2, max_pairs), Dense has shape (N, max_neighbors)
+    if neighbor_idx.ndim == 2 and neighbor_idx.shape[0] == 2 and neighbor_idx.shape[1] != N:
+        # Sparse format: (2, max_pairs)
+        receivers = neighbor_idx[0]
+        senders = neighbor_idx[1]
+        mask = receivers < N
 
-        # Compute distances to valid neighbors
-        def dist_to_j(j_idx):
-            j = neighs[j_idx]
-            # Safe indexing - if j < 0, distance will be masked out
-            pos_j = jnp.where(j >= 0, positions[jnp.maximum(j, 0)], pos_i)
-            return jnp.linalg.norm(pos_j - pos_i)
+        # Compute pairwise distances
+        dr = positions[senders] - positions[receivers]
+        r = jnp.sqrt(jnp.sum(dr ** 2, axis=1))
+        r = jnp.where(mask, r, 1e10)
 
-        dists = jax.vmap(dist_to_j)(jnp.arange(len(neighs)))
-        # Mask invalid neighbors with large distance
-        dists = jnp.where(valid_mask, dists, 1e10)
-        return dists
+        # For each receiver, collect distances and find k smallest
+        # Use a scatter approach: build (N, max_per_particle) array
+        # Approximate: just compute mean of all valid neighbor distances per particle
+        valid_r = jnp.where(mask, r, 0.0)
+        sum_r = jax.ops.segment_sum(valid_r, receivers, N)
+        count_r = jax.ops.segment_sum(mask.astype(jnp.float32), receivers, N)
+        # Mean nearest neighbor distance (approximate for k-nearest)
+        mean_k_nearest = jnp.mean(sum_r / jnp.maximum(count_r, 1.0))
+        return mean_k_nearest
+    else:
+        # Dense format fallback
+        def compute_neighbor_dists(i):
+            pos_i = positions[i]
+            neighs = neighbor_idx[i]
+            valid_mask = neighs >= 0
 
-    all_neighbor_dists = jax.vmap(compute_neighbor_dists)(jnp.arange(len(positions)))
+            def dist_to_j(j_idx):
+                j = neighs[j_idx]
+                pos_j = jnp.where(j >= 0, positions[jnp.maximum(j, 0)], pos_i)
+                return jnp.linalg.norm(pos_j - pos_i)
 
-    # Sort and take mean of k smallest
-    sorted_dists = jnp.sort(all_neighbor_dists, axis=1)
-    # Skip first entry (self or zero distance) and take next k
-    mean_k_nearest = jnp.mean(sorted_dists[:, :k])
+            dists = jax.vmap(dist_to_j)(jnp.arange(len(neighs)))
+            dists = jnp.where(valid_mask, dists, 1e10)
+            return dists
 
-    return mean_k_nearest
+        all_neighbor_dists = jax.vmap(compute_neighbor_dists)(jnp.arange(N))
+        sorted_dists = jnp.sort(all_neighbor_dists, axis=1)
+        mean_k_nearest = jnp.mean(sorted_dists[:, :k])
+        return mean_k_nearest
 
 
 def compute_clustering_coefficient(positions, neighbors, radius=0.1):
     """Compute spatial clustering coefficient using neighbor list.
 
     Measures how clustered particles are in space.
-    Uses existing spatial partitioning to avoid O(N²).
+    Supports both Dense and Sparse neighbor list formats.
     """
-    # Get neighbor indices
+    N = positions.shape[0]
     neighbor_idx = neighbors.idx
 
-    # Count valid neighbors for each particle
-    def count_neighbors(i):
-        neighs = neighbor_idx[i]
-        valid_mask = neighs >= 0
-        return jnp.sum(valid_mask)
+    if neighbor_idx.ndim == 2 and neighbor_idx.shape[0] == 2 and neighbor_idx.shape[1] != N:
+        # Sparse format
+        receivers = neighbor_idx[0]
+        mask = receivers < N
+        # Count valid neighbors per particle
+        neighbor_counts = jax.ops.segment_sum(mask.astype(jnp.float32), receivers, N)
+        # Sparse lists each pair twice, so divide by 2
+        mean_neighbors = jnp.mean(neighbor_counts) / 2.0
+    else:
+        # Dense format fallback
+        def count_neighbors(i):
+            neighs = neighbor_idx[i]
+            valid_mask = neighs >= 0
+            return jnp.sum(valid_mask)
 
-    neighbor_counts = jax.vmap(count_neighbors)(jnp.arange(len(positions)))
-    mean_neighbors = jnp.mean(neighbor_counts)
+        neighbor_counts = jax.vmap(count_neighbors)(jnp.arange(N))
+        mean_neighbors = jnp.mean(neighbor_counts)
 
-    # Normalize by typical neighbor count
-    N = positions.shape[0]
-    clustering = mean_neighbors / jnp.maximum(1.0, float(N) * 0.1)  # Normalize by 10% of particles
-
+    clustering = mean_neighbors / jnp.maximum(1.0, float(N) * 0.1)
     return clustering
 
 

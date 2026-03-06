@@ -45,15 +45,15 @@ def force_graph(r, rmax, alpha, repulsion_dist, repulsion):
 
 @functools.partial(jax.jit, static_argnames=['displacement_fn'])
 def compute_forces_with_neighbors(positions, species, alpha, neighbor_idx, rmax, repulsion_dist, repulsion, displacement_fn):
-    """Compute forces using jax-md neighbor lists.
+    """Compute forces using jax-md sparse neighbor lists.
 
-    Optimized version using masking instead of per-neighbor branching.
+    Uses pair-based computation with segment_sum for O(num_pairs) memory.
 
     Args:
         positions: (N, 2) particle positions
         species: (N, species_dims) species vectors
         alpha: (N, species_dims) interaction matrix
-        neighbor_idx: (N, max_neighbors) neighbor indices from jax-md
+        neighbor_idx: (2, max_pairs) sparse neighbor pair indices from jax-md
         rmax: interaction radius
         repulsion_dist: repulsion distance
         repulsion: repulsion strength
@@ -62,37 +62,30 @@ def compute_forces_with_neighbors(positions, species, alpha, neighbor_idx, rmax,
     Returns:
         forces: (N, 2) force vectors
     """
-    def compute_particle_force(pos_i, alpha_i, neighbors):
-        """Compute force on particle i from its neighbors using masking."""
-        # Get neighbor positions and species (use index 0 for invalid neighbors, will be masked)
-        safe_neighbors = jnp.maximum(neighbors, 0)
-        n_positions = positions[safe_neighbors]
-        n_species = species[safe_neighbors]
+    N = positions.shape[0]
+    receivers = neighbor_idx[0]  # (max_pairs,)
+    senders = neighbor_idx[1]    # (max_pairs,)
+    mask = receivers < N         # padding entries have index >= N
 
-        # Compute displacements vectorized (no per-neighbor function calls)
-        dr = jax.vmap(lambda n_x: displacement_fn(n_x, pos_i))(n_positions)
-        r = jnp.sqrt(jnp.sum(jnp.square(dr), axis=1)).clip(1e-10)
+    # Compute displacements for all pairs
+    dr = jax.vmap(displacement_fn)(positions[senders], positions[receivers])  # sender -> receiver
+    r = jnp.sqrt(jnp.sum(jnp.square(dr), axis=1)).clip(1e-10)
 
-        # Compute interactions vectorized
-        interactions = jnp.dot(n_species, alpha_i)
+    # Compute interaction strengths: dot(species[sender], alpha[receiver])
+    interactions = jnp.sum(species[senders] * alpha[receivers], axis=1)
 
-        # Compute force scalars vectorized
-        force_scalars = jax.vmap(
-            lambda r_, a_: force_graph(r_, rmax, a_, repulsion_dist, repulsion)
-        )(r, interactions)
+    # Compute force scalars
+    force_scalars = jax.vmap(
+        lambda r_, a_: force_graph(r_, rmax, a_, repulsion_dist, repulsion)
+    )(r, interactions)
 
-        # Compute force vectors
-        directions = dr / (r[:, jnp.newaxis] + 1e-10)
-        forces = directions * force_scalars[:, jnp.newaxis]
+    # Compute force vectors and mask invalid pairs
+    directions = dr / (r[:, jnp.newaxis] + 1e-10)
+    pair_forces = directions * (force_scalars * mask)[:, jnp.newaxis]
 
-        # Mask invalid neighbors (no branching, just zero out)
-        valid_mask = (neighbors >= 0)[:, jnp.newaxis]
-        forces = forces * valid_mask
-
-        return forces.sum(axis=0)
-
-    # Vectorize over all particles
-    forces = jax.vmap(compute_particle_force)(positions, alpha, neighbor_idx)
+    # Scatter forces back to receiver particles
+    # No division needed: pair (i,j) contributes force on i, pair (j,i) contributes force on j
+    forces = jax.ops.segment_sum(pair_forces, receivers, N)
     return forces
 
 
@@ -135,16 +128,17 @@ def compute_step(x, v, species, alpha, neighbor_idx, mass, damping, dt, rmax,
 def copy_species_with_neighbors(subkeys, species, alpha, positions, neighbor_idx,
                                 max_copy_dist=0.08, max_species_dist=0.2, copy_prob=0.001,
                                 displacement_fn=None):
-    """Copy species using jax-md neighbor lists.
+    """Copy species using jax-md sparse neighbor lists.
 
-    Optimized version using masking instead of per-neighbor branching.
+    Uses pair-based computation to build per-particle copy probability tables,
+    then samples from them.
 
     Args:
         subkeys: Random keys
         species: (N, species_dims) species vectors
         alpha: (N, species_dims) interaction matrix
         positions: (N, 2) particle positions
-        neighbor_idx: (N, max_neighbors) neighbor indices
+        neighbor_idx: (2, max_pairs) sparse neighbor pair indices
         max_copy_dist: Maximum distance for copying
         max_species_dist: Maximum species difference for copying
         copy_prob: Probability of copying per particle
@@ -155,62 +149,71 @@ def copy_species_with_neighbors(subkeys, species, alpha, positions, neighbor_idx
         alpha: Updated interaction matrix
     """
     N = species.shape[0]
-    LOG10 = jnp.float32(2.302585)  # Precomputed ln(10)
+    LOG10 = jnp.float32(2.302585)
 
-    def compute_copy_probs(i, pos_i, species_i, neighbors):
-        """Compute copy probabilities using masking instead of branching."""
-        # Safe indexing for invalid neighbors
-        safe_neighbors = jnp.maximum(neighbors, 0)
-        n_positions = positions[safe_neighbors]
-        n_species = species[safe_neighbors]
+    receivers = neighbor_idx[0]
+    senders = neighbor_idx[1]
+    mask = receivers < N
 
-        # Compute distances vectorized
-        dr = jax.vmap(lambda n_x: displacement_fn(n_x, pos_i))(n_positions)
-        r = jnp.sqrt(jnp.sum(dr ** 2, axis=1)).clip(1e-10)
+    # Compute pairwise distances
+    dr = jax.vmap(displacement_fn)(positions[senders], positions[receivers])
+    r = jnp.sqrt(jnp.sum(dr ** 2, axis=1)).clip(1e-10)
 
-        # Compute species differences vectorized
-        species_diff = jnp.linalg.norm(n_species - species_i, axis=1)
+    # Compute species differences
+    species_diff = jnp.linalg.norm(species[senders] - species[receivers], axis=1)
 
-        # Check conditions (vectorized)
-        within_dist = r < max_copy_dist
-        within_species = species_diff < max_species_dist
-        valid_neighbor = neighbors >= 0
-        not_self = neighbors != i
-        valid = within_dist & within_species & valid_neighbor & not_self
+    # Compute validity and copy probability per pair
+    valid = mask & (receivers != senders) & (r < max_copy_dist) & (species_diff < max_species_dist)
+    dist_factor = 1.0 - r / max_copy_dist
+    species_factor = jnp.exp(-species_diff * LOG10)
+    pair_probs = jnp.where(valid, dist_factor * species_factor, 0.0)
 
-        # Compute probability factors
-        dist_factor = 1.0 - r / max_copy_dist
-        # Optimized: exp(-species_diff * ln(10)) instead of pow(10, -species_diff)
-        species_factor = jnp.exp(-species_diff * LOG10)
+    # For each receiver particle, we need to sample one sender to copy from.
+    # Build a fixed-size per-particle candidate list using a scatter approach.
+    # We'll pick the top-K candidates per particle using a simple approach:
+    # For each particle, accumulate total probability and pick proportionally.
 
-        # Apply mask (no branching)
-        probs = jnp.where(valid, dist_factor * species_factor, 0.0)
+    # Strategy: each particle picks a random pair weighted by pair_probs.
+    # We use Gumbel-max trick: argmax(log(prob) + gumbel_noise) per particle.
+    gumbel_noise = jax.random.gumbel(subkeys[0], pair_probs.shape)
+    # -inf for invalid pairs so they're never selected
+    scores = jnp.where(pair_probs > 0, jnp.log(pair_probs + 1e-10) + gumbel_noise, -jnp.inf)
 
-        return probs, neighbors
+    # For each receiver particle, find the pair with the highest score.
+    # Use segment_max-like approach: scatter scores into (N, ) by taking max per receiver.
+    # We need the argmax, so we work with a flat approach.
+    NEG_INF = jnp.float32(-1e30)
+    best_scores = NEG_INF * jnp.ones(N)
+    best_scores = best_scores.at[receivers].max(scores)
 
-    # Get copy probabilities for all particles
-    all_probs, all_indices = jax.vmap(compute_copy_probs)(
-        jnp.arange(N), positions, species, neighbor_idx
+    # Find which pair index matches the best score for each receiver
+    # (tie-breaking is arbitrary, which is fine for stochastic selection)
+    is_best = (scores == best_scores[receivers]) & (pair_probs > 0)
+
+    # For particles with multiple "best" pairs (rare ties), pick the first one
+    # by using cumulative count and taking only count==1
+    pair_indices = jnp.arange(len(receivers))
+
+    # Scatter the sender index of the best pair to each receiver
+    # Use a large default so we can detect "no valid neighbor"
+    best_senders = jnp.full(N, N, dtype=jnp.int32)
+    # Reverse iterate conceptually — .at[].min ensures we pick a valid one
+    best_senders = best_senders.at[receivers].min(
+        jnp.where(is_best, senders, N)
     )
 
-    # Normalize probabilities
-    row_sums = all_probs.sum(axis=1, keepdims=True)
-    all_probs = jnp.where(row_sums > 0, all_probs / row_sums, 0.0)
-
-    # Sample which neighbor to copy from
-    copy_sources_local = jax.random.categorical(subkeys[0], jnp.log(all_probs + 1e-10), axis=1)
-
-    # Get actual particle indices
-    copy_sources = all_indices[jnp.arange(N), copy_sources_local]
+    # Determine which particles have valid copy candidates
+    has_valid = best_senders < N
 
     # Sample which particles will copy
-    copy_mask = jax.random.uniform(subkeys[1], (N,)) < copy_prob
-    has_valid_neighbor = (row_sums[:, 0] > 0)
-    copy_mask = copy_mask & has_valid_neighbor
+    copy_mask = (jax.random.uniform(subkeys[1], (N,)) < copy_prob) & has_valid
+
+    # Clamp for safe indexing
+    safe_senders = jnp.minimum(best_senders, N - 1)
 
     # Perform copying
-    species = jnp.where(copy_mask[:, jnp.newaxis], species[copy_sources], species)
-    alpha = jnp.where(copy_mask[:, jnp.newaxis], alpha[copy_sources], alpha)
+    species = jnp.where(copy_mask[:, jnp.newaxis], species[safe_senders], species)
+    alpha = jnp.where(copy_mask[:, jnp.newaxis], alpha[safe_senders], alpha)
 
     return species, alpha
 
@@ -515,9 +518,9 @@ class ParticleLife:
             self.displacement_fn,
             box=size,
             r_cutoff=self.rmax,
-            dr_threshold=0.01,  # No buffer, rebuild every time
-            capacity_multiplier=4.0,  # 300% extra capacity for safety
-            format=partition.NeighborListFormat.Dense
+            dr_threshold=0.01,
+            capacity_multiplier=2.0,
+            format=partition.NeighborListFormat.Sparse
         )
         
         # Initialize positions and species in tiles
