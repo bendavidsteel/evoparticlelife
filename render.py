@@ -1,9 +1,9 @@
 import collections
 import functools
 
-import einops
 import jax
 import jax.numpy as jp
+from tqdm import tqdm
 
 
 @functools.partial(jax.jit, static_argnames=['img_size'])
@@ -13,7 +13,7 @@ def draw_particles_2d_fast(positions, particle_colors, map_size, img_size=800):
 
     splat_size = 10
     linspace = jp.linspace(-1, 1, splat_size, dtype=jp.float32)
-    gaussian = jp.exp(-linspace**2 / 0.1)
+    gaussian = jp.exp(-linspace**2 / 0.2)
     splat_template = jp.outer(gaussian, gaussian)
 
     # Ensure colors are float32
@@ -305,10 +305,32 @@ def triangle(x, center=0.5):
     y2 = jp.clip(1 / (1 - center) - (1 / (1 - center)) * x, 0, 1)
     return 2 * y1 * y2 - 1
 
-# @functools.partial(jax.jit, static_argnames=('fps', 'sample_rate'))
-def sonify_particles(trajectory, energy, force, species, num_species, map_size, fps=30, sample_rate=44100):
+def sonify_particles_batch(trajectory_batch, velocities_batch, species_batch, map_size, fps=30, sample_rate=44100):
+    """Process a batch of particles for audio generation.
+
+    Args:
+        trajectory_batch: (num_frames, batch_size, 2) particle positions
+        velocities_batch: (num_frames, batch_size, 2) particle velocities
+        species_batch: (num_frames, batch_size, species_dims) species vectors
+        map_size: Size of simulation box
+        fps: Frames per second of the simulation
+        sample_rate: Audio sample rate
+
+    Returns:
+        left_channel, right_channel: (batch_size, num_samples) audio channels
+    """
     base_freq = 100
-    resampled_energy = jax.vmap(resample, in_axes=(1, None, None))(energy, fps, sample_rate)
+
+    # Compute energy from velocities (kinetic energy proxy)
+    energy = jp.sum(velocities_batch ** 2, axis=-1)  # (num_frames, batch_size)
+
+    # Compute "force" proxy from velocity changes (acceleration)
+    force = jp.diff(velocities_batch, axis=0)
+    force = jp.concatenate([force, force[-1:]], axis=0)  # Pad to same length
+
+    # Transpose for resampling: need (batch_size, num_frames)
+    energy_t = energy.T
+    resampled_energy = jax.vmap(resample, in_axes=(0, None, None))(energy_t, fps, sample_rate)
 
     # Add vibrato to frequency before generating waveform
     vibrato_rate = 5.0  # Hz
@@ -318,43 +340,107 @@ def sonify_particles(trajectory, energy, force, species, num_species, map_size, 
 
     freq = (400 * jp.exp(-resampled_energy) + base_freq) * vibrato[None, :]
     p = jax.vmap(modcumsum, in_axes=(0, None))(freq / sample_rate, 1)
-    species_skew = 0.01 + species * 0.1
-    sawtooth = jax.vmap(triangle)(p, center=species_skew)
+
+    # Use first species dimension for sound variation, averaged over time
+    species_mean = species_batch.mean(axis=0)[:, 0]  # (batch_size,)
+    species_skew = 0.5 + species_mean * 0.4  # Keep in valid range for triangle
+    species_skew = jp.clip(species_skew, 0.1, 0.9)
+
+    sawtooth = jax.vmap(triangle, in_axes=(0, 0))(p, species_skew)
     signal = jax.vmap(simple_lowpass, in_axes=(0, None, None))(sawtooth, 1000, sample_rate)
 
     centre = jp.array([map_size / 2, map_size / 2])
     left_ear = centre - jp.array([map_size / 3, 0])
     right_ear = centre + jp.array([map_size / 3, 0])
-    left_ear_dist = jp.linalg.norm(trajectory - left_ear, axis=-1)
-    right_ear_dist = jp.linalg.norm(trajectory - right_ear, axis=-1)
-    
+
+    # Compute distances: trajectory is (num_frames, batch_size, 2)
+    left_ear_dist = jp.linalg.norm(trajectory_batch - left_ear, axis=-1)
+    right_ear_dist = jp.linalg.norm(trajectory_batch - right_ear, axis=-1)
+
     audio_unit_dist = 2
-    min_dist = 1.0  # Prevent division by very small numbers
+    min_dist = 1.0
     force_mag = jp.linalg.norm(force, axis=-1)
 
     left_gain = jp.log1p(force_mag) / jp.maximum(left_ear_dist / audio_unit_dist ** 2, min_dist)
     right_gain = jp.log1p(force_mag) / jp.maximum(right_ear_dist / audio_unit_dist ** 2, min_dist)
 
-    left_gain = jax.vmap(resample, in_axes=(1, None, None))(left_gain, fps, sample_rate)
-    right_gain = jax.vmap(resample, in_axes=(1, None, None))(right_gain, fps, sample_rate)
+    # Transpose for resampling
+    left_gain = jax.vmap(resample, in_axes=(0, None, None))(left_gain.T, fps, sample_rate)
+    right_gain = jax.vmap(resample, in_axes=(0, None, None))(right_gain.T, fps, sample_rate)
 
-    # Apply gains with softer limiting
+    # Apply gains - return per-particle channels (batch_size, num_samples)
     left_channel = signal * left_gain
     right_channel = signal * right_gain
 
-    # Soft clipping with RMS normalization
+    return left_channel, right_channel
+
+
+def sonify_particles(trajectory, velocities, species, map_size, fps=30, sample_rate=44100, batch_size=500):
+    """Generate stereo audio from particle simulation data with batched processing.
+
+    Args:
+        trajectory: (num_frames, num_particles, 2) particle positions
+        velocities: (num_frames, num_particles, 2) particle velocities
+        species: (num_frames, num_particles, species_dims) species vectors
+        map_size: Size of simulation box
+        fps: Frames per second of the simulation
+        sample_rate: Audio sample rate
+        batch_size: Number of particles to process at once
+    """
+    import numpy as np
+
     num_particles = trajectory.shape[1]
-    left_channel = soft_clip(left_channel.sum(axis=0) / jp.sqrt(num_particles)) * 0.8
-    right_channel = soft_clip(right_channel.sum(axis=0) / jp.sqrt(num_particles)) * 0.8
+    num_frames = trajectory.shape[0]
 
-    envelope = create_envelope(signal.shape[1], int(0.1 * sample_rate))  # 100ms attack
-    left_channel *= envelope
-    right_channel *= envelope
+    # Process first batch to get actual sample length
+    traj_batch = trajectory[:, 0:min(batch_size, num_particles), :]
+    vel_batch = velocities[:, 0:min(batch_size, num_particles), :]
+    spec_batch = species[:, 0:min(batch_size, num_particles), :]
 
-    return jp.stack([
-        left_channel,
-        right_channel
-    ], axis=0)
+    left_batch, right_batch = sonify_particles_batch(
+        traj_batch, vel_batch, spec_batch, map_size, fps, sample_rate
+    )
+    num_samples = left_batch.shape[1]
+
+    # Initialize accumulators with correct size
+    left_accum = np.array(left_batch.sum(axis=0))
+    right_accum = np.array(right_batch.sum(axis=0))
+
+    # Process remaining batches
+    for start_idx in tqdm(range(batch_size, num_particles, batch_size), desc="Sonifying particles"):
+        end_idx = min(start_idx + batch_size, num_particles)
+
+        traj_batch = trajectory[:, start_idx:end_idx, :]
+        vel_batch = velocities[:, start_idx:end_idx, :]
+        spec_batch = species[:, start_idx:end_idx, :]
+
+        left_batch, right_batch = sonify_particles_batch(
+            traj_batch, vel_batch, spec_batch, map_size, fps, sample_rate
+        )
+
+        # Sum this batch's contribution
+        left_accum += np.array(left_batch.sum(axis=0))
+        right_accum += np.array(right_batch.sum(axis=0))
+
+    # Normalize based on 99th percentile amplitude to avoid spikes dominating
+    # (initial particle settling can cause huge spikes)
+    combined = np.concatenate([np.abs(left_accum), np.abs(right_accum)])
+    target_amplitude = np.percentile(combined, 99)
+    if target_amplitude > 0:
+        # Normalize so 99th percentile hits 0.7 (leaves headroom for soft clip)
+        normalization_factor = 0.7 / target_amplitude
+    else:
+        normalization_factor = 1.0
+
+    left_channel = soft_clip(jp.array(left_accum) * normalization_factor) * 0.9
+    right_channel = soft_clip(jp.array(right_accum) * normalization_factor) * 0.9
+
+    # Apply envelope
+    envelope = create_envelope(num_samples, int(0.1 * sample_rate))
+    left_channel = left_channel * envelope
+    right_channel = right_channel * envelope
+
+    return jp.stack([left_channel, right_channel], axis=0)
 
 
 @jax.jit

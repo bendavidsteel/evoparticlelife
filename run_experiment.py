@@ -60,6 +60,7 @@ def main(cfg: DictConfig):
         n_dims=cfg.simulation.n_dims,
         dt=cfg.simulation.dt,
         steps_per_frame=cfg.simulation.steps_per_frame,
+        key=key,
     )
 
     # Override default parameters with config
@@ -79,6 +80,8 @@ def main(cfg: DictConfig):
     sim.damping = (0.5) ** (cfg.simulation.dt / cfg.simulation.half_life)
 
     # Update params namedtuple with all parameters
+    # mutation_period defaults to steps_per_frame for consistent mutation rate
+    mutation_period = cfg.mutation.get('mutation_period', cfg.simulation.steps_per_frame)
     sim.params = sim.params._replace(
         mass=cfg.simulation.mass,
         half_life=cfg.simulation.half_life,
@@ -90,6 +93,7 @@ def main(cfg: DictConfig):
         max_copy_dist=cfg.mutation.max_copy_dist,
         max_species_dist=cfg.mutation.max_species_dist,
         copy_prob=cfg.mutation.copy_prob,
+        mutation_period=mutation_period,
     )
 
     # Initialize metrics tracker
@@ -151,13 +155,14 @@ def main(cfg: DictConfig):
                 if cfg.metrics.compute.physics or cfg.metrics.compute.evolutionary or cfg.metrics.compute.behavioral:
                     metrics = metrics_tracker.compute_all_metrics(sim, step)
 
-                    # Add rendered image periodically
+                    # Add rendered image periodically (every 1000 steps)
                     if cfg.wandb.mode != "disabled" and step >= next_image_step:
                         try:
                             size = jnp.array([cfg.simulation.box_size] * cfg.simulation.n_dims)
                             colours = species_to_color(sim.species)
                             img = draw_particles_2d_fast(sim.positions, colours, size, img_size=512)
-                            metrics['visualization'] = wandb.Image(img, caption=f"Step {step}")
+                            img_np = np.array(img * 255).astype(np.uint8)
+                            metrics['visualization'] = wandb.Image(img_np, caption=f"Step {step}")
                             next_image_step += image_log_interval
                         except Exception as e:
                             print(f"Warning: Image logging failed: {e}")
@@ -168,8 +173,9 @@ def main(cfg: DictConfig):
                     # Print some metrics
                     print(f"\nStep {step}:")
                     print(f"  Momentum: {metrics.get('momentum', 0):.4f}")
-                    print(f"  Species entropy: {metrics.get('species_entropy', 0):.4f}")
                     print(f"  Unique species: {metrics.get('num_unique_species', 0)}")
+                    print(f"  Species entropy: {metrics.get('species_entropy', 0):.4f}")
+                    print(f"  Pairwise diversity: {metrics.get('species_pairwise_diversity', 0):.4f}")
 
                 next_log_step += log_interval_steps
 

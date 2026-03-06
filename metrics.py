@@ -49,63 +49,48 @@ def compute_spatial_extent(positions, box_size):
 # Species Diversity Metrics
 # =============================================================================
 
-@jax.jit
-def compute_num_unique_species(species, threshold=0.1):
-    """Count number of unique species based on distance threshold.
+def compute_num_unique_species(species):
+    """Count number of unique species vectors (exact match).
+
+    Species are defined by their exact vector values - no binning needed
+    since particles share exact species vectors from initialization/copying.
 
     Args:
         species: (N, species_dims) species vectors
-        threshold: Distance threshold for considering species the same
 
     Returns:
-        Approximate number of unique species
+        Number of unique species
     """
-    # Use fewer bins but int64 to avoid overflow for high dimensions
-    # For 8D with 10 bins: 10^8 = 100M < 2^63, safe for int64
-    n_bins = 10
-    species_binned = jnp.floor((species + 1.0) * n_bins / 2.0).astype(jnp.int64)
-    species_binned = jnp.clip(species_binned, 0, n_bins - 1)
-
-    # Create unique identifier using int64 to prevent overflow
-    species_ids = species_binned[:, 0].astype(jnp.int64)
-    for i in range(1, species.shape[1]):
-        species_ids = species_ids * n_bins + species_binned[:, i]
-
-    # Count unique IDs - use a large enough size to capture diversity
-    max_unique = min(species.shape[0], 10000)
-    unique_ids = jnp.unique(species_ids, size=max_unique, fill_value=-1)
-    # Count non-padding entries
-    num_unique = jnp.sum(unique_ids >= 0)
-
-    return num_unique
+    # Convert to numpy for efficient unique counting
+    species_np = np.array(species)
+    # Use view as bytes for exact comparison
+    species_view = species_np.view(np.dtype((np.void, species_np.dtype.itemsize * species_np.shape[1])))
+    unique_species = np.unique(species_view)
+    return len(unique_species)
 
 
-@jax.jit
 def compute_species_diversity_entropy(species):
-    """Compute species diversity using Shannon entropy on species vectors.
+    """Compute Shannon entropy over exact unique species.
 
-    Groups species into bins and computes entropy of the distribution.
+    H = -sum(p_i * log(p_i)) where p_i is fraction of particles with species i.
+
+    Args:
+        species: (N, species_dims) species vectors
+
+    Returns:
+        Shannon entropy in nats
     """
-    # Discretize species vectors into bins
-    n_bins = 10
-    species_binned = jnp.floor(species * n_bins / 2 + n_bins / 2).astype(jnp.int32)
-    species_binned = jnp.clip(species_binned, 0, n_bins - 1)
-
-    # Create unique identifier for each species combination
-    species_ids = species_binned[:, 0]
-    for i in range(1, species.shape[1]):
-        species_ids = species_ids * n_bins + species_binned[:, i]
-
-    # Count occurrences
-    unique_ids, counts = jnp.unique(species_ids, return_counts=True, size=species.shape[0])
+    # Convert to numpy for efficient counting
+    species_np = np.array(species)
+    # Use view as bytes for exact comparison
+    species_view = species_np.view(np.dtype((np.void, species_np.dtype.itemsize * species_np.shape[1])))
+    _, counts = np.unique(species_view, return_counts=True)
 
     # Compute Shannon entropy
-    probs = counts / jnp.sum(counts)
-    # Filter out zero probabilities
-    probs = jnp.where(probs > 0, probs, 1.0)  # Replace 0 with 1 to avoid log(0)
-    entropy = -jnp.sum(jnp.where(counts > 0, probs * jnp.log(probs), 0.0))
+    probs = counts / counts.sum()
+    entropy = -np.sum(probs * np.log(probs))
 
-    return entropy
+    return float(entropy)
 
 
 @jax.jit
@@ -127,7 +112,7 @@ def compute_species_range(species):
     return jnp.mean(ranges)
 
 
-def compute_species_pairwise_diversity(species, key=None):
+def compute_species_pairwise_diversity(species, key=None, normalize=True):
     """Compute mean pairwise distance between species.
 
     Higher value = species are more different from each other.
@@ -135,6 +120,11 @@ def compute_species_pairwise_diversity(species, key=None):
     Args:
         species: (N, species_dims) species vectors
         key: Optional JAX random key. If None, uses step-based deterministic sampling.
+        normalize: If True, divide by sqrt(species_dims) for cross-dimension comparison.
+                   This accounts for the fact that distances naturally scale with dimension.
+
+    Returns:
+        Mean pairwise distance, optionally normalized for cross-dimension comparison.
     """
     # Sample random pairs to avoid O(N^2) computation
     N = species.shape[0]
@@ -153,7 +143,15 @@ def compute_species_pairwise_diversity(species, key=None):
 
     # Compute pairwise distances
     dists = jnp.linalg.norm(species[idx1] - species[idx2], axis=1)
-    return jnp.mean(dists)
+    mean_dist = jnp.mean(dists)
+
+    if normalize:
+        # Normalize by sqrt(dim) to make comparable across dimensions
+        # In a uniform distribution over [-1,1]^d, expected distance scales as sqrt(d)
+        species_dims = species.shape[1]
+        mean_dist = mean_dist / jnp.sqrt(species_dims)
+
+    return mean_dist
 
 
 # =============================================================================

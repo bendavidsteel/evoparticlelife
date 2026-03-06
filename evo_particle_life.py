@@ -24,6 +24,7 @@ Params = collections.namedtuple('Params', [
     'max_copy_dist',
     'max_species_dist',
     'copy_prob',
+    'mutation_period',  # Number of physics steps between mutation opportunities
 ])
 
 @jax.jit
@@ -334,6 +335,9 @@ def update_func_while(positions, velocities, species, alpha, neighbors, params, 
     This is more efficient than fixed step counts because it maximizes the number of steps
     between neighbor list rebuilds.
 
+    Mutation is applied multiple times based on mutation_period to ensure consistent
+    mutation rates regardless of max_steps setting.
+
     Returns:
         Updated positions, velocities, species, alpha, neighbors, key, and actual step count
     """
@@ -368,24 +372,39 @@ def update_func_while(positions, velocities, species, alpha, neighbors, params, 
         cond_fn, body_fn, init_carry
     )
 
-    # Copy species using params from config
-    key, *subkeys = jax.random.split(key, 3)
-    species, alpha = copy_species_with_neighbors(
-        subkeys, species, alpha, positions,
-        neighbors.idx,
-        max_copy_dist=params.max_copy_dist,
-        max_species_dist=params.max_species_dist,
-        copy_prob=params.copy_prob,
-        displacement_fn=displacement_fn
-    )
+    # Calculate number of mutation opportunities based on steps taken
+    # Apply mutation/copy once per mutation_period steps
+    num_mutations = jnp.maximum(1, final_step_count // params.mutation_period)
 
-    # Apply circle-based mutation using params from config
-    key, subkey = jax.random.split(key)
-    species, alpha = mutate_circle(
-        subkey, positions, species, alpha,
-        box_size,
-        mutation_prob=params.mutation_prob,
-        displacement_fn=displacement_fn
+    def mutation_body(i, carry):
+        """Apply one round of copy and mutation."""
+        species, alpha, key = carry
+
+        # Copy species
+        key, *subkeys = jax.random.split(key, 3)
+        species, alpha = copy_species_with_neighbors(
+            subkeys, species, alpha, positions,
+            neighbors.idx,
+            max_copy_dist=params.max_copy_dist,
+            max_species_dist=params.max_species_dist,
+            copy_prob=params.copy_prob,
+            displacement_fn=displacement_fn
+        )
+
+        # Mutate species
+        key, subkey = jax.random.split(key)
+        species, alpha = mutate_circle(
+            subkey, positions, species, alpha,
+            box_size,
+            mutation_prob=params.mutation_prob,
+            displacement_fn=displacement_fn
+        )
+
+        return species, alpha, key
+
+    # Apply mutation num_mutations times
+    species, alpha, key = jax.lax.fori_loop(
+        0, num_mutations, mutation_body, (species, alpha, key)
     )
 
     return positions, velocities, species, alpha, neighbors, key, final_step_count
@@ -393,7 +412,11 @@ def update_func_while(positions, velocities, species, alpha, neighbors, params, 
 
 @functools.partial(jax.jit, static_argnames=['steps_per_selection', 'displacement_fn', 'shift_fn'])
 def update_func(positions, velocities, species, alpha, neighbors, params, key, steps_per_selection, box_size, displacement_fn, shift_fn):
-    """Original update function using fixed step count (kept for compatibility)."""
+    """Original update function using fixed step count.
+
+    Mutation is applied based on mutation_period to ensure consistent
+    mutation rates regardless of steps_per_selection setting.
+    """
     # Run multiple physics sub-steps
     (positions, velocities, neighbors), _ = jax.lax.scan(
         functools.partial(multi_step, species=species, alpha=alpha, params=params, displacement_fn=displacement_fn, shift_fn=shift_fn),
@@ -402,31 +425,45 @@ def update_func(positions, velocities, species, alpha, neighbors, params, key, s
         length=steps_per_selection
     )
 
-    # Copy species using params from config
-    key, *subkeys = jax.random.split(key, 3)
-    species, alpha = copy_species_with_neighbors(
-        subkeys, species, alpha, positions,
-        neighbors.idx,
-        max_copy_dist=params.max_copy_dist,
-        max_species_dist=params.max_species_dist,
-        copy_prob=params.copy_prob,
-        displacement_fn=displacement_fn
-    )
+    # Calculate number of mutation opportunities based on steps taken
+    num_mutations = jnp.maximum(1, steps_per_selection // params.mutation_period)
 
-    # Apply circle-based mutation using params from config
-    key, subkey = jax.random.split(key)
-    species, alpha = mutate_circle(
-        subkey, positions, species, alpha,
-        box_size,
-        mutation_prob=params.mutation_prob,
-        displacement_fn=displacement_fn
+    def mutation_body(i, carry):
+        """Apply one round of copy and mutation."""
+        species, alpha, key = carry
+
+        # Copy species
+        key, *subkeys = jax.random.split(key, 3)
+        species, alpha = copy_species_with_neighbors(
+            subkeys, species, alpha, positions,
+            neighbors.idx,
+            max_copy_dist=params.max_copy_dist,
+            max_species_dist=params.max_species_dist,
+            copy_prob=params.copy_prob,
+            displacement_fn=displacement_fn
+        )
+
+        # Mutate species
+        key, subkey = jax.random.split(key)
+        species, alpha = mutate_circle(
+            subkey, positions, species, alpha,
+            box_size,
+            mutation_prob=params.mutation_prob,
+            displacement_fn=displacement_fn
+        )
+
+        return species, alpha, key
+
+    # Apply mutation num_mutations times
+    species, alpha, key = jax.lax.fori_loop(
+        0, num_mutations, mutation_body, (species, alpha, key)
     )
 
     return positions, velocities, species, alpha, neighbors, key
         
 
 class ParticleLife:
-    def __init__(self, num_particles, species_dims, size=1.0, n_dims=2, dt=0.001, steps_per_frame=10):
+    def __init__(self, num_particles, species_dims, size=1.0, n_dims=2, dt=0.001, steps_per_frame=10, key=None):
 
         self.num_particles = num_particles
         self.species_dims = species_dims
@@ -434,8 +471,8 @@ class ParticleLife:
         self.n_dims = n_dims
         self.dt = dt
         self.steps_per_frame = steps_per_frame
-        
-        self.key = jax.random.PRNGKey(2)
+
+        self.key = key if key is not None else jax.random.PRNGKey(1)
         
         # Physics parameters
         self.mass = 0.02
@@ -449,6 +486,7 @@ class ParticleLife:
         self.max_copy_dist = 0.08
         self.max_species_dist = 0.2
         self.copy_prob = 0.001
+        self.mutation_period = 20  # Apply mutation every N physics steps
 
         # Precompute damping coefficient
         self.damping = (0.5) ** (self.dt / self.half_life)
@@ -465,6 +503,7 @@ class ParticleLife:
             max_copy_dist=self.max_copy_dist,
             max_species_dist=self.max_species_dist,
             copy_prob=self.copy_prob,
+            mutation_period=self.mutation_period,
         )
         
         # Create displacement function for periodic boundaries using jax-md
@@ -571,30 +610,57 @@ class ParticleLife:
 
 @jax.jit
 def species_to_color(species):
-    """Convert species vectors to RGB colors."""
-    colors = jnp.stack([
-        0.5 + 0.5 * jnp.maximum(species[:, 0], 0),
-        0.5 + 0.5 * jnp.maximum(-species[:, 0], 0),
-        0.5 + 0.5 * (species[:, 1] + 1) * 0.5,
-    ], axis=-1)
-    return colors
+    """Convert species vectors to RGB colors using HSV with max S and V.
+
+    Uses the angle of the 2D species vector to determine hue.
+    """
+    # Get hue from angle of species vector (0 to 1)
+    hue = (jnp.arctan2(species[:, 1], species[:, 0]) + jnp.pi) / (2 * jnp.pi)
+
+    # HSV to RGB with S=1, V=1
+    # H is in [0, 1], we need to find which sextant
+    h6 = hue * 6.0
+    sector = jnp.floor(h6).astype(jnp.int32) % 6
+    f = h6 - jnp.floor(h6)  # fractional part
+
+    # With S=1, V=1: p=0, q=1-f, t=f
+    # Sector 0: RGB = (1, t, 0) = (1, f, 0)
+    # Sector 1: RGB = (q, 1, 0) = (1-f, 1, 0)
+    # Sector 2: RGB = (0, 1, t) = (0, 1, f)
+    # Sector 3: RGB = (0, q, 1) = (0, 1-f, 1)
+    # Sector 4: RGB = (t, 0, 1) = (f, 0, 1)
+    # Sector 5: RGB = (1, 0, q) = (1, 0, 1-f)
+
+    r = jnp.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4, sector == 5],
+        [jnp.ones_like(f), 1 - f, jnp.zeros_like(f), jnp.zeros_like(f), f, jnp.ones_like(f)]
+    )
+    g = jnp.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4, sector == 5],
+        [f, jnp.ones_like(f), jnp.ones_like(f), 1 - f, jnp.zeros_like(f), jnp.zeros_like(f)]
+    )
+    b = jnp.select(
+        [sector == 0, sector == 1, sector == 2, sector == 3, sector == 4, sector == 5],
+        [jnp.zeros_like(f), jnp.zeros_like(f), f, jnp.ones_like(f), jnp.ones_like(f), 1 - f]
+    )
+
+    return jnp.stack([r, g, b], axis=-1)
 
 
 def main():
     # Simulation parameters
-    num_particles = 4000
+    num_particles = 5000
     species_dim = 2
-    size = jnp.array([3.0, 3.0])
+    size = jnp.array([4.0, 4.0])
     n_dims = len(size)
-    steps_per_frame = 20
+    steps_per_frame = 30
     
     # Create simulation
     sim = ParticleLife(num_particles, species_dim, size, n_dims=n_dims, steps_per_frame=steps_per_frame)
     
     width, height = 800, 800
 
-    render_to_screen = True
-    # renderer = ParticleJAXRenderer(width, height, size, n_dims, num_particles, render_to_screen=render_to_screen, render_to_video=not render_to_screen)
+    render_to_screen = False
     if render_to_screen:
         render_scale = 1.0  # Scale for display
         pygame.init()
@@ -625,24 +691,50 @@ def main():
                        pixelformat='yuv420p')
         
         trajectory = []
+        velocities = []
+        species = []
         for frame_idx in tqdm(range(num_frames)):
-            positions = sim.step()
+            positions, _ = sim.step_while(max_steps=sim.steps_per_frame)
             colours = species_to_color(sim.species)
 
             image = draw_particles_2d_fast(positions, colours, size, img_size=800)
-        
+
             # Convert to numpy only for display (single transfer)
             image_np = np.array(image * 255).astype(np.uint8)
             w.append_data(image_np)
 
             # Store trajectory
             trajectory.append(positions)
+            velocities.append(sim.velocities)
+            species.append(sim.species)
         w.close()
 
         trajectories = jnp.stack(trajectory)
-        audio = sonify_particles(trajectories, energy, force, species)
+        velocities = jnp.stack(velocities)
+        species = jnp.stack(species)
+        audio = sonify_particles(trajectories, velocities, species, size[0], batch_size=200)
 
-        print(f"Saved simulation video to {video_filename}")
+        # Save audio to WAV file
+        import scipy.io.wavfile as wavfile
+        audio_filename = "./outputs/evo_particle_life_audio.wav"
+        audio_np = np.array(audio.T)  # Transpose to (samples, channels)
+        wavfile.write(audio_filename, 44100, audio_np.astype(np.float32))
+        print(f"Saved audio to {audio_filename}")
+
+        # Combine video and audio using ffmpeg
+        import subprocess
+        output_filename = "./outputs/evo_particle_life_with_audio.mp4"
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_filename,
+            "-i", audio_filename,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-shortest",
+            output_filename
+        ], check=True)
+
+        print(f"Saved video with audio to {output_filename}")
 
 
 if __name__ == "__main__":
